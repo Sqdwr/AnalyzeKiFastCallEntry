@@ -1,0 +1,111 @@
+ nt!KiFastCallEntry:
+80542520 b923000000      mov     ecx,23h
+80542525 6a30            push    30h
+80542527 0fa1            pop     fs//把fs从0x3B转化成0x30，从_TEB转化成_KPCR
+80542529 8ed9            mov     ds,cx//把ds和es都指向0x23
+8054252b 8ec1            mov     es,cx//这里看了一下0x23h指向的GDT表基址是0
+8054252d 648b0d40000000  mov     ecx,dword ptr fs:[40h]//ecx指向TSS
+80542534 8b6104          mov     esp,dword ptr [ecx+4]//从TSS中拿出esp0，传递给当前的esp。处理器切换线程的时候一般都切换TSS内部的值
+80542537 6a23            push    23h//压入用户模式的ds，es寄存器的值
+80542539 52              push    edx//edx指向了返回用户层的地址
+8054253a 9c              pushfd//压入标志寄存器的值
+8054253b 6a02            push    2//压入一个10
+8054253d 83c208          add     edx,8//如果是int2e调用下来的，edx直接指向用户栈。sysenter下来的时候edx上面有两个函数的地址（KiFastSystemCall，Nt****）
+80542540 9d              popfd//把10谈出到标志寄存器，相当于把中断寄存器清零（第二位长为1，因此这里写10）（屏蔽中断位，相当于cli）
+80542541 804c240102      or      byte ptr [esp+1],2//开启用户模式中断位，这个esp指向上面压进来的eflags寄存器
+80542546 6a1b            push    1Bh//压入0x1B == 11011，理论上是cs寄存器，但是不应该是0x8么，但是这里的基址也是0，limit也是ffff
+80542548 ff350403dfff    push    dword ptr ds:[0FFDF0304h]//0xFFDF0000代表着一个共享页面，该页面内部保存着_KUSER_SHARED_DATA这个结构体304偏移量是SystemCallReturn的地址
+8054254e 6a00            push    0//ErrCode是0，压入ErrCode
+80542550 55              push    ebp//压入ebp
+80542551 53              push    ebx//压入ebx
+80542552 56              push    esi//压入esi
+80542553 57              push    edi//压入edi
+80542554 648b1d1c000000  mov     ebx,dword ptr fs:[1Ch]//ebx指向_kpcr
+8054255b 6a3b            push    3Bh//压入用户层的fs寄存器，3B
+8054255d 8bb324010000    mov     esi,dword ptr [ebx+124h]//esi指向currentthread
+80542563 ff33            push    dword ptr [ebx]//_kpcr首部是TIB，TIB的首部是_EXCEPTION_REGISTRATION_RECORD，这个事实上指向了_EXCEPTION_REGISTRATION_RECORD
+80542565 c703ffffffff    mov     dword ptr [ebx],0FFFFFFFFh//初始化ExceptionList  因为双向链表的上一项不存在，因此这里用-1进行初始化（链表的上一项/下一项不存在，-1来表示不存在）
+8054256b 8b6e18          mov     ebp,dword ptr [esi+28h]//获取KTHREAD的InitialStack 原始栈
+8054256e 6a01            push    1//压入PreviousPreviousMode，是USER_MODE == 1
+80542570 83ec48          sub     esp,48h//为剩下的_KTRAP_FRAME分配内存
+80542573 81ed9c020000    sub     ebp,29Ch//29C == 是内核栈上保存的浮点寄存器保存区和异常陷阱帧（sizeof(KTRAP_FRAME) + sizeof(FX_SAVE_AREA)）
+80542579 c6864001000001  mov     byte ptr [esi+13Ah],1//设置线程的PreviouwMode为1 == USER_MODE
+80542580 3bec            cmp     ebp,esp//原始栈 - （sizeof(KTRAP_FRAME) + sizeof(FX_SAVE_AREA)） = 系统栈，这里比较一下是否相等
+83e7f122 7597            jne     nt!KiFastCallEntry2+0x49 (83e7f0bb)//不相等则属于V86模式，则跳转除去处理（基本不会走这里，不管）
+83e7f124 83652c00        and     dword ptr [ebp+2Ch],0//把DR7（调试寄存器）清零
+83e7f128 f64603df        test    byte ptr [esi+3],0DFh//DebugActive一字节变量，用来测试dr0 - dr7是否为空。DF表示如果dr0，1，2，3，6，7为1则跳转（4，5遗弃，为什么不是CF....MS没解释）
+83e7f12c 89ae28010000    mov     dword ptr [esi+128h],ebp//把上面我们扔进了栈里的TRAP_FRAME初始化给当前线程的TRAP_FRAME
+83e7f132 0f8538feffff    jne     nt!Dr_FastCallDrSave (83e7ef70)//如果当前线程存在硬件断点，则出去处理。
+83e7f138 8b5d60          mov     ebx,dword ptr [ebp+60h]//把TRAP_FRAME中的ebp赋值给ebx，该ebp就是进入函数的时候的ebp
+83e7f13b 8b7d68          mov     edi,dword ptr [ebp+68h]//把TRAP_FRAME中的eip赋值给edi，该eip就是SystemCallReturn的地址
+83e7f13e 89550c          mov     dword ptr [ebp+0Ch],edx//把edx赋值给TRAP_FRAME中的DbgArgPointer，edx指向的就是用户层的参数
+83e7f141 c74508000ddbba  mov     dword ptr [ebp+8],0BADB0D00h//把0BADB0D00 赋值给 TRAP_FRAME中的DbgArgMark           ***********************************这值什么意思，没找到解答
+83e7f148 895d00          mov     dword ptr [ebp],ebx//把进入该函数时的Ebp赋值给DbgEbp
+83e7f14b 897d04          mov     dword ptr [ebp+4],edi//把edi赋值给DbgEip，该edi就是SystemCallReturn
+83e7f14e fb              sti//TRAP_FRAME初始化完毕，开中断
+83e7f14f 8bf8            mov     edi,eax//把系统服务号赋值给edi
+83e7f151 c1ef08          shr     edi,8//SSDT和SHADOW SSDT的区别是，SHADOW SSDT下标比SSDT大0x1000，这里右移八位变成0x10
+83e7f154 83e710          and     edi,10h//判断是SSDT还是SHADOW SSDT
+83e7f157 8bcf            mov     ecx,edi//把结果赋值给ecx，ecx如果不为0则是SHADOW SSDT否则是SSDT
+83e7f159 03bebc000000    add     edi,dword ptr [esi+0BCh] //edi指向该线程的ServiceTable（有可能是SSDT或者SHADOW SSDT）
+这里是add，所以如果一个非gui线程第一次调用shadow ssdt这里指向一个空数组（KeServiceDescriptorTable的第二项是空） （这里edi只可能是0或者10H，如果是0则表示指向第一个数组，否则指向第二个数组）
+83e7f15f 8bd8            mov     ebx,eax//把系统服务号赋值给ebx
+83e7f161 25ff0f0000      and     eax,0FFFh//不管是SHADOW SSDT还是SSDT先只保留下标
+83e7f166 3b4708          cmp     eax,dword ptr [edi+8]  //比较如今的eax是否超过SSDT的下标限制（如果是第一次请求SHADOW SSDT，这个比较的值一定是0，因此这里会去进行线程转化。但是如果想要指向的值是SSDT，这里的比较就会产生溢出错误）
+83e7f169 0f8333fdffff    jae     nt!KiBBTUnexpectedRange (83e7eea2)//则跳转出去 处理该异常（判断如果下标是SHADOW SSDT则强行把现成转化成GUI线程）
+83e7f16f 83f910          cmp     ecx,10h//比较是否为SHADOW SSDT
+83e7f172 751a            jne     nt!KiFastCallEntry+0xce (83e7f18e)//如果也不是则跳转到83e7f18e执行
+83e7f174 8b8e88000000    mov     ecx,dword ptr [esi+88h]//令ecx指向teb
+83e7f17a 33f6            xor     esi,esi//esi清零
+83e7f17c 0bb1700f0000    or      esi,dword ptr [ecx+0F70h]//把GdiBatchCount的值清零
+83e7f182 740a            je      nt!KiFastCallEntry+0xce (83e7f18e)//如果GdiBatchCount为0则跳转
+83e7f184 52              push    edx//压入参数地址。
+83e7f185 50              push    eax//压入下标号
+83e7f186 ff154cb9fa83    call    dword ptr [nt!KeGdiFlushUserBatch (83fab94c)]//这个函数不知道干嘛用的。
+83e7f18c 58              pop     eax//弹出下标号？不确定上面函数是否操作eax，edx
+83e7f18d 5a              pop     edx//弹出参数地址？
+
+83e7f18e 64ff05b0060000  inc     dword ptr fs:[6B0h]//KeSystemCalls 次数 + 1
+83e7f195 8bf2            mov     esi,edx//esi保存参数地址
+83e7f197 33c9            xor     ecx,ecx//ecx清零
+83e7f199 8b570c          mov     edx,dword ptr [edi+0Ch]//edx保存参数大小 的数组的起始地址
+83e7f19c 8b3f            mov     edi,dword ptr [edi]//edi保存SDT的基址
+83e7f19e 8a0c10          mov     cl,byte ptr [eax+edx]//cl保存所有参数的大小
+83e7f1a1 8b1487          mov     edx,dword ptr [edi+eax*4]//edx保存需要调用函数的地址
+83e7f1a4 2be1            sub     esp,ecx//在系统堆栈中开辟一块等于参数大小的地址
+83e7f1a6 c1e902          shr     ecx,2//参数大小除以4，因为SSDT所有函数的每个参数大小都为4
+83e7f1a9 8bfc            mov     edi,esp//edi指向esp开辟出的内核栈空间地址
+83e7f1ab 3b351cb7fa83    cmp     esi,dword ptr [nt!MmUserProbeAddress (83fab71c)]//比较用户空间的地址是否超过用户空间最大地址0xffff0000
+83e7f1b1 0f832e020000    jae     nt!KiSystemCallExit2+0xa5 (83e7f3e5)//如果大于，则去处理异常
+83e7f1b7 f3a5            rep movs dword ptr es:[edi],dword ptr [esi]//复制用户空间的参数到内核空间中，cl作为次数
+83e7f1b9 f6456c01        test    byte ptr [ebp+6Ch],1//测试Segcs末位是否为1（判断cs是r3还是r0，然而这个cs不是在最初的1B么，ms在想什么）
+83e7f1bd 7416            je      nt!KiFastCallEntry+0x115 (83e7f1d5)//如果在用户层则去83e7f1d5执行（难道不是一定去吗？或者中间有跳出的部分？）
+83e7f1bf 648b0d24010000  mov     ecx,dword ptr fs:[124h]//ecx指向currenthread
+83e7f1c6 8b3c24          mov     edi,dword ptr [esp]//edi赋值为参数表第一个参数
+83e7f1c9 89993c010000    mov     dword ptr [ecx+13Ch],ebx//把SSDT下标号传递给KTHREAD的SystemCallNumber
+83e7f1cf 89b92c010000    mov     dword ptr [ecx+12Ch],edi//把第一个参数 传递给KTHREAD的FirstArgument
+
+83e7f1d5 8bda            mov     ebx,edx//把函数的地址复制给ebx
+83e7f1d7 f6050889f78340  test    byte ptr [nt!PerfGlobalGroupMask+0x8 (83f78908)],40h//不懂这个是干嘛的 *************************
+83e7f1de 0f954512        setne   byte ptr [ebp+12h]//Logging设置为0。如果上面比较的ZF = 1，否则设置为1
+83e7f1e2 0f858c030000    jne     nt!KiServiceExit2+0x17b (83e7f574)//如果ZF是0则跳转
+83e7f1e8 ffd3            call    ebx//调用函数
+83e7f1ea f6456c01        test    byte ptr [ebp+6Ch],1//测试Segcs末位是否为1
+83e7f1ee 7434            je      nt!KiFastCallEntry+0x164 (83e7f224)//如果是1（表示在用户模式，则跳出去处理）
+83e7f1f0 8bf0            mov     esi,eax//把函数下标传递给esi
+83e7f1f2 ff156821e483    call    dword ptr [nt!_imp__KeGetCurrentIrql (83e42168)]//获取当前的IRQL，返回值应该在eax
+83e7f1f8 0ac0            or      al,al//比较特权级别是不是0（PASSIVE_LEVEL）
+83e7f1fa 0f853b030000    jne     nt!KiServiceExit2+0x142 (83e7f53b)//如果不是0则跳转退出，如果是0则不跳
+83e7f200 8bc6            mov     eax,esi//把函数下标赋值给eax
+83e7f202 648b0d24010000  mov     ecx,dword ptr fs:[124h]//ecx指向当前线程对象
+83e7f209 f68134010000ff  test    byte ptr [ecx+134h],0FFh//检查ApcStateIndex是不是0，如果是0说明在所属进程，否则挂靠到了别的进程
+83e7f210 0f8543030000    jne     nt!KiServiceExit2+0x160 (83e7f559)//如果不是0则跳转退出，否则继续执行
+83e7f216 8b9184000000    mov     edx,dword ptr [ecx+84h]//把KernelApcDisable拷贝到edx中，该值为0表示不禁止APC，负数表示禁止APC
+83e7f21c 0bd2            or      edx,edx//判断是否为0
+83e7f21e 0f8535030000    jne     nt!KiServiceExit2+0x160 (83e7f559)//如果不为0则退出
+83e7f224 8be5            mov     esp,ebp//把KTRAP_FRAME的基地址传递给esp
+83e7f226 807d1200        cmp     byte ptr [ebp+12h],0//比较Logging是否为0
+83e7f22a 0f8550030000    jne     nt!KiServiceExit2+0x187 (83e7f580)//如果不为0则退出
+83e7f230 648b0d24010000  mov     ecx,dword ptr fs:[124h]//令ecx指向当前线程对象
+83e7f237 8b553c          mov     edx,dword ptr [ebp+3Ch]//把TRAP_FRAME中的edx赋值给edx**********这里有点问题，TRAP_FRAME的edx是未初始化的，为什么可以赋值，感觉是上面几个跳来跳去的函数中赋值的
+83e7f23a 899128010000    mov     dword ptr [ecx+128h],edx//把edx赋值给线程的TrapFrame
